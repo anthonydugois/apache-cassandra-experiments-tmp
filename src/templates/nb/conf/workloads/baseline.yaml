@@ -1,0 +1,41 @@
+scenarios:
+  default:
+    schema: run driver=cqld4 tags==block:schema threads==1 cycles==UNDEF
+    rampup: run driver=cqld4 tags==block:rampup threads=auto cycles===TEMPLATE(rampup-cycles,1000)
+    main: run driver=cqld4 tags==block:main-read threads=auto cycles===TEMPLATE(main-cycles,1000)
+
+bindings:
+  inserted_key: Mod(TEMPLATE(keycount,1000)); Hash(); ToString() -> String
+  inserted_value: CharBufImage("a-zA-Z0-9", 1000, 128); ToString() -> String
+  selected_key: Uniform(0,TEMPLATE(keycount,1000)); Hash(); ToString() -> String
+
+blocks:
+  schema:
+    params:
+      prepared: false
+    ops:
+      create-keyspace: |
+        CREATE KEYSPACE IF NOT EXISTS TEMPLATE(keyspace,baselines)
+        WITH REPLICATION = {'class': 'SimpleStrategy', 'replication_factor': TEMPLATE(rf,1)}
+        AND DURABLE_WRITES = true;
+      create-table: |
+        CREATE TABLE IF NOT EXISTS TEMPLATE(keyspace,baselines).TEMPLATE(table,keyvalue) (
+          key text,
+          value text,
+          PRIMARY KEY (key)
+        );
+  rampup:
+    params:
+      cl: LOCAL_QUORUM
+    ops:
+      rampup-insert: |
+        INSERT INTO TEMPLATE(keyspace,baselines).TEMPLATE(table,keyvalue) (key, value)
+        VALUES ({inserted_key}, {inserted_value});
+  main-read:
+    params:
+      ratio: 1
+      cl: LOCAL_ONE
+    ops:
+      main-select: |
+        SELECT key, value FROM TEMPLATE(keyspace,baselines).TEMPLATE(table,keyvalue)
+        WHERE key = {selected_key};

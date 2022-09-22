@@ -11,7 +11,7 @@ CASSANDRA_SPAWN_TIME_IN_SECONDS = 120
 
 
 en_config.set_config(g5k_cache=False)
-# en.init_logging()
+en.init_logging()
 
 
 def get_g5k_resources(conf):
@@ -51,7 +51,7 @@ def get_g5k_resources(conf):
                      cluster=conf["cluster"],
                      nodes=conf["seed_count"],
                      primary_network=network)
-        .add_machine(roles=["hosts", "cassandra", "others"],
+        .add_machine(roles=["hosts", "cassandra", "not_seeds"],
                      cluster=conf["cluster"],
                      nodes=conf["node_count"] - conf["seed_count"],
                      primary_network=network)
@@ -217,12 +217,35 @@ def deploy_cassandra(roles, docker_image):
                                  ])
 
 
+def deploy_nosqlbench(roles, docker_image):
+    with en.actions(roles=roles["clients"]) as actions:
+        actions.file(path="/root/nosqlbench", state="directory")
+        actions.docker_image(name=docker_image, source="pull")
+
+
+def run_nosqlbench(roles, docker_image, command):
+    with en.actions(roles=roles["clients"]) as actions:
+        actions.docker_container(name="nosqlbench",
+                                 image=docker_image,
+                                 command=command,
+                                 network_mode="host",
+                                 mounts=[
+                                     {
+                                         "source": "/root/nosqlbench",
+                                         "target": "/etc/nosqlbench",
+                                         "type": "bind"
+                                     }
+                                 ])
+
+
 def start_cassandra_nodes(roles):
     for role in roles:
         with en.actions(roles=role) as actions:
             actions.docker_container(name="cassandra", state="started")
         
         time.sleep(CASSANDRA_SPAWN_TIME_IN_SECONDS)
+        
+        logging.info(f"Cassandra is up and running on host {role.address}")
 
 
 def start_cassandra(roles):
@@ -242,9 +265,17 @@ def start_cassandra(roles):
     """
 
     start_cassandra_nodes(roles["seeds"])
-    
-    logging.info("Seed nodes are running. Starting remaining nodes...")
-    
     start_cassandra_nodes(roles["others"])
     
     logging.info("Cassandra cluster is running!")
+
+
+def deploy_and_start_cassandra(roles, conf_template_path, docker_image):
+    set_cassandra_conf_path(roles)
+    set_cassandra_conf(roles, conf_template_path)
+
+    transfer_cassandra_conf(roles)
+
+    deploy_cassandra(roles, docker_image)
+
+    start_cassandra(roles)
