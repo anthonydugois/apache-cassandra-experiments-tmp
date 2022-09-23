@@ -6,7 +6,7 @@ scenarios:
 
 bindings:
   inserted_key: Mod(TEMPLATE(keycount,1000)); Hash(); ToString() -> String
-  inserted_value: CharBufImage("a-zA-Z0-9", 1000, 128); ToString() -> String
+  inserted_value: CharBufImage("a-zA-Z0-9", 100000, 1024); ToString() -> String
   selected_key: Uniform(0,TEMPLATE(keycount,1000)); Hash(); ToString() -> String
 
 blocks:

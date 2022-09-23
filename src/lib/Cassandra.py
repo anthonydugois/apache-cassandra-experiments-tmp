@@ -82,37 +82,58 @@ def host_addresses(hosts, port=0):
 
 
 class Cassandra:
-    def __init__(self, name, docker_image, root_path="/root/cassandra"):
+    def __init__(self, name, docker_image,
+                 conf_dir="conf",
+                 root_path="/root/cassandra",
+                 container_conf_path="/etc/cassandra",
+                 local_tmp_path="__tmp_cassandra__"):
         self.name = name
         self.docker_image = docker_image
+        
         self.root_path = root_path
+        self.conf_path = f"{root_path}/{conf_dir}"
+        self.container_conf_path = container_conf_path
+        self.local_tmp_path = local_tmp_path
 
-        self.mounts = []
         self.hosts = None
         self.seeds = None
         self.not_seeds = None
+
+    @property
+    def host_count(self):
+        return len(self.hosts) if self.hosts is not None else 0
     
-    def reset(self):
-        self.mounts = []
-        self.hosts = None
-        self.seeds = None
-        self.not_seeds = None
+    @property
+    def seed_count(self):
+        return len(self.seeds) if self.seeds is not None else 0
+    
+    @property
+    def not_seed_count(self):
+        return len(self.not_seeds) if self.not_seeds is not None else 0
 
-    def set_host_data(self):
+    def set_hosts(self, hosts):
+        self.hosts = hosts
+        
         for host in self.hosts:
-            local_root_path = host.address
+            local_root_path = f"{self.local_tmp_path}/{host.address}"
+            local_conf_path = f"{local_root_path}/conf"
 
             host.extra.update(local_root_path=local_root_path)
-            host.extra.update(local_conf_path=f"{local_root_path}/conf")
+            host.extra.update(local_conf_path=local_conf_path)
+
+            pathlib.Path(local_conf_path).mkdir(parents=True, exist_ok=True)
+
+    def set_seeds(self, seeds):
+        self.seeds = seeds
+
+    def set_not_seeds(self, not_seeds):
+        self.not_seeds = not_seeds
 
     def create_config(self, template_path):
         seed_addresses = ",".join(host_addresses(self.seeds, port=7000))
 
         for host in self.hosts:
             local_conf_path = host.extra["local_conf_path"]
-
-            # Make sure the output directory exists
-            pathlib.Path(local_conf_path).mkdir(parents=True, exist_ok=True)
 
             build_yaml(template_path=template_path,
                        output_path=f"{local_conf_path}/cassandra.yaml",
@@ -121,31 +142,6 @@ class Cassandra:
                            "listen_address": host.address,
                            "rpc_address": host.address
                        })
-
-    def setup(self, hosts, seeds, not_seeds, conf_template):
-        self.reset()
-
-        self.hosts = hosts
-        self.seeds = seeds
-        self.not_seeds = not_seeds
-        
-        self.mount(source=f"{self.root_path}/conf/cassandra.yaml",
-                   target="/etc/cassandra/cassandra.yaml")
-
-        self.set_host_data()
-
-        self.create_config(conf_template)
-
-    def cleanup(self):
-        for host in self.hosts:
-            shutil.rmtree(host.extra["local_root_path"])
-
-    def mount(self, source, target, type="bind"):
-        self.mounts.append({
-            "source": source,
-            "target": target,
-            "type": type
-        })
 
     def deploy(self):
         """
@@ -162,10 +158,10 @@ class Cassandra:
             actions.file(path=self.root_path, state="directory")
 
             # Transfer configuration files
-            actions.copy(src="{{local_conf_path}}", dest=self.root_path)
+            actions.copy(src="{{local_root_path}}/", dest=self.root_path)
 
             # Disable the swap memory
-            actions.shell(command="swapoff --all")
+            actions.shell(cmd="swapoff --all")
 
             # Increase number of memory map areas
             actions.sysctl(name="vm.max_map_count", value="1048575")
@@ -176,7 +172,15 @@ class Cassandra:
                                      state="present",
                                      detach="yes",
                                      network_mode="host",
-                                     mounts=self.mounts)
+                                     mounts=[
+                                         {
+                                            "source": f"{self.conf_path}/cassandra.yaml",
+                                            "target": f"{self.container_conf_path}/cassandra.yaml",
+                                            "type": "bind"
+                                         }
+                                     ])
+            
+        logging.info("Cassandra has been deployed. Ready to start.")
 
     def start_host(self, host, spawn_time=120):
         """
@@ -184,12 +188,14 @@ class Cassandra:
         in order to let Cassandra start properly.
         """
         
+        logging.info(f"Starting Cassandra on {host.address}...")
+        
         with en.actions(roles=host) as actions:
             actions.docker_container(name=self.name, state="started")
         
         time.sleep(spawn_time)
         
-        logging.info(f"Cassandra is up and running on host {host.address}")
+        logging.info(f"Cassandra is up and running on host {host.address}.")
 
     def start(self):
         """
@@ -210,12 +216,16 @@ class Cassandra:
         for host in self.seeds:
             self.start_host(host)
 
-        for host in self.not_seeds:
-            self.start_host(host)
+        if self.not_seeds is not None:
+            for host in self.not_seeds:
+                self.start_host(host)
 
         logging.info("Cassandra is running!")
 
-    def deploy_and_start(self):
+    def cleanup(self):
+        shutil.rmtree(self.local_tmp_path)
+
+    def deploy_and_start(self, cleanup=True):
         """
         Util to deploy and start Cassandra in one call.
         """
@@ -223,3 +233,22 @@ class Cassandra:
         self.deploy()
         
         self.start()
+        
+        if cleanup:
+            self.cleanup()
+    
+    def nodetool(self, command="status"):
+        with en.actions(roles=self.hosts[0]) as actions:
+            actions.shell(cmd=f"docker exec {self.name} nodetool {command}")
+
+            results = actions.results
+        
+        return results[0].payload["stdout"]
+
+    def du(self, path="/var/lib/cassandra/data"):
+        with en.actions(roles=self.hosts[0]) as actions:
+            actions.shell(cmd=f"docker exec {self.name} du -sh {path}")
+
+            results = actions.results
+        
+        return results[0].payload["stdout"]
